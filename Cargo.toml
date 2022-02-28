@@ -2,14 +2,20 @@
 name = "pi_atom"
 version = "0.1.0"
 authors = ["zmythleo <zmythleo@gmail.com>"]
+edition = "2021"
+description = "全局的线程安全的原子字符串池，减少相同字符串的内存占用，也用于hashmap的键"
+repository = "https://github.com/GaiaWorld/pi_atom"
+license = "MIT OR Apache-2.0"
+keywords = ["pi",  "atom"]
+
 
 [dependencies]
 fnv = "1.0.6"
 lazy_static = "*"
-pi_bon = {path="../pi_bon"}
-pi_time = {path="../pi_time"}
-pi_share = {path = "../pi_share"}
-pi_hash = {path="../pi_hash", features = ["xxhash"]}
+pi_bon = "0.1"
+pi_time = "0.1"
+pi_share = "0.1"
+pi_hash = "0.1"
 
 [dependencies.serde]
 version = "1.0"
