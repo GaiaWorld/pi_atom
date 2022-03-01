@@ -3,7 +3,7 @@ name = "pi_atom"
 version = "0.1.0"
 authors = ["zmythleo <zmythleo@gmail.com>"]
 edition = "2021"
-description = "全局的线程安全的原子字符串池，减少相同字符串的内存占用，也用于hashmap的键"
+description = "The global thread safe atomic string pool reduces the memory occupation of the same string and is also used for HashMap keys"
 repository = "https://github.com/GaiaWorld/pi_atom"
 license = "MIT OR Apache-2.0"
 keywords = ["pi",  "atom"]
@@ -11,7 +11,7 @@ keywords = ["pi",  "atom"]
 
 [dependencies]
 fnv = "1.0.6"
-lazy_static = "*"
+lazy_static = "1.4"
 pi_bon = "0.1"
 pi_time = "0.1"
 pi_share = "0.1"
