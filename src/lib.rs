@@ -196,7 +196,7 @@ unsafe impl Send for Table {}
 
 impl Table{
 	pub fn get(&self, h: usize) -> Option<Atom>{
-		let map = self.0.read().unwrap();
+		let map = self.0.read();
 		match map.get(&h) {
 			Some(v) => match v.list.value.upgrade() {
 				Some(r) => Some(Atom(r)),
@@ -208,7 +208,7 @@ impl Table{
 	pub fn or_insert(&self, s: String) -> Atom {
 		let h = str_hash(&s, &mut DefaultHasher::default());
 		let optlist = {
-			let map = self.0.read().unwrap();
+			let map = self.0.read();
 			match map.get(&h) {
 				Some(v) => Some(v.clone()),
 				_ => None
@@ -238,7 +238,7 @@ impl Table{
             }
 		};
 
-		let mut map = self.0.write().unwrap();
+		let mut map = self.0.write();
 		match map.entry(h) {
 			Entry::Occupied(mut e) => {
 				let old = e.get_mut();
