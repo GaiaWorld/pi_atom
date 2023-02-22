@@ -13,7 +13,6 @@ keywords = ["pi",  "atom"]
 fnv = "1.0.6"
 lazy_static = "1.4"
 pi_bon = "0.2"
-pi_time = "0.1"
 pi_share = "0.4"
 pi_hash = "0.1"
 fxhash = "0.2.1"
