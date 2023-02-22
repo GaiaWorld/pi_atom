@@ -33,7 +33,7 @@ use std::iter::Map;
 #[cfg(feature = "serde")]
 use serde::{Serialize, Deserialize, Serializer, Deserializer};
 
-use pi_hash::{XHashMap, DefaultHasher};
+use pi_hash::XHashMap;
 use pi_bon::{WriteBuffer, ReadBuffer, Encode, Decode, ReadBonErr};
 use pi_share::{Share, ShareWeak, ShareRwLock};
 
@@ -42,6 +42,18 @@ lazy_static! {
 	static ref ATOM_MAP: Table = Table(ShareRwLock::new(XHashMap::default()));
 	pub static ref EMPTY: Atom = Atom::from(Vec::new());
 }
+
+#[cfg(all(not(feature = "pi_hash/xxhash"), not(feature="pointer_width_32")))]
+pub type CurHasher = fxhash::FxHasher64;
+
+#[cfg(all(not(feature = "pi_hash/xxhash"), feature="pointer_width_32"))]
+pub type CurHasher = fxhash::FxHasher32;
+
+#[cfg(all(feature = "pi_hash/xxhash", not(feature="pointer_width_32")))]
+pub type CurHasher = twox_hash::XxHash64;
+
+#[cfg(all(feature = "pi_hash/xxhash", feature="pointer_width_32"))]
+pub type CurHasher = twox_hash::XxHash32;
 
 // 原子字符串
 #[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -206,7 +218,7 @@ impl Table{
 		}
 	}
 	pub fn or_insert(&self, s: String) -> Atom {
-		let h = str_hash(&s, &mut DefaultHasher::default());
+		let h = str_hash(&s, &mut CurHasher::default());
 		let optlist = {
 			let map = self.0.read();
 			match map.get(&h) {
@@ -342,18 +354,15 @@ impl CowList{
 	}
 }
 
-#[cfg(test)]
-extern crate time;
-
 #[test]
 fn test_atom() {
 
     Atom::from("abc");
-	assert_eq!(ATOM_MAP.0.read().expect("ATOM_MAP:error").len(), 1);
+	assert_eq!(ATOM_MAP.0.read().len(), 1);
 	Atom::from("afg");
-	assert_eq!(ATOM_MAP.0.read().expect("ATOM_MAP:error").len(), 2);
+	assert_eq!(ATOM_MAP.0.read().len(), 2);
 	let at3 = Atom::from("afg");
-	assert_eq!(ATOM_MAP.0.read().expect("ATOM_MAP:error").len(), 2);
+	assert_eq!(ATOM_MAP.0.read().len(), 2);
 	assert_eq!((at3.0).0, "afg");
     let mut buf = WriteBuffer::new();
     let a = Atom::from("vvvvvvv");
@@ -361,17 +370,17 @@ fn test_atom() {
 	println!("EMPTY: {:?}", *EMPTY);
 
     let mut map = XHashMap::default();
-    let time = time::now_millisecond();
+    let time = std::time::Instant::now();
     for _ in 0..1000000 {
         map.insert("xx", "xx");
     }
-    println!("insert map time{}", time::now_millisecond() - time);
+    println!("insert map time:{:?}", std::time::Instant::now() - time);
 
-    let time = time::now_millisecond();
+    let time = std::time::Instant::now();
     for i in 0..1000000 {
         Atom::from(i.to_string());
     }
-    println!("atom from time{}", time::now_millisecond() - time);
+    println!("atom from time:{:?}", std::time::Instant::now() - time);
 
     
     let mut arr = Vec::new();
@@ -379,48 +388,48 @@ fn test_atom() {
         arr.push(Atom::from(i.to_string()));
     }
 
-    let time = time::now_millisecond();
+    let time = std::time::Instant::now();
     for i in 0..1000{
         for _ in 0..1000{
             Atom::from(arr[i].as_str());
         }
     }
-    println!("atom1 from time{}", time::now_millisecond() - time);
+    println!("atom1 from time:{:?}", std::time::Instant::now() - time);
 
 
-    let time = time::now_millisecond();
+    let time = std::time::Instant::now();
     for i in 0..1000{
         for _ in 0..1000{
             Share::new((arr[i].as_str().to_string(), 5));
         }
     }
-    println!("Share::new time{}", time::now_millisecond() - time);
+    println!("Share::new time:{:?}", std::time::Instant::now() - time);
 
-    let time = time::now_millisecond();
+    let time = std::time::Instant::now();
     for i in 0..1000{
         for _ in 0..1000{
             arr[i].as_str().to_string();
         }
     }
-    println!("to_string time{}", time::now_millisecond() - time);
+    println!("to_string time:{:?}", std::time::Instant::now() - time);
 
-    let time = time::now_millisecond();
+    let time = std::time::Instant::now();
     for i in 0..10{
         for _ in 0..100000{
-            let _ = str_hash(arr[i].as_str(), &mut DefaultHasher::default());
+            let _ = str_hash(arr[i].as_str(), &mut CurHasher::default());
         }
     }
-    println!("cul hash{}", time::now_millisecond() - time);
+    println!("cul hash: {:?}", std::time::Instant::now() - time);
 
-    let time = time::now_millisecond();
+    let time = std::time::Instant::now();
     let xx = Share::new(1);
     let w = Share::downgrade(&xx);
     for _ in 0..1000000{
             w.upgrade();
     }
-    println!("upgrade{}", time::now_millisecond() - time);
+    println!("upgrade:{:?}", std::time::Instant::now() - time);
 
-    let time = time::now_millisecond();
+    let time = std::time::Instant::now();
     let xx = Share::new(1);
     //let w = Share::downgrade(&xx);
     for _ in 0..1000{
@@ -428,6 +437,6 @@ fn test_atom() {
             let _a = xx.clone();
         }
     }
-    println!("clone {}", time::now_millisecond() - time);
+    println!("clone: {:?}", std::time::Instant::now() - time);
 
 }
