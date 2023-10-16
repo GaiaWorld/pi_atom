@@ -1,13 +1,6 @@
-#![allow(warnings)]
-
-#![feature(core_intrinsics)]
-#![feature(nll)]
-#![feature(pattern)]
-#![feature(weak_counts)]
-
-//! 全局的线程安全的原子字符串池，减少相同字符串的内存占用，也用于hashmap的键
-//! 如果全局该字符串最后一个引用被释放， 则该字符串会释放。
-//! 为了减少不停的创建和放入池的次数，高频单次的Atom，可以在应用层增加一个cache来缓冲Atom，定期检查引用计数来判断是否缓冲。
+/// 全局的线程安全的原子字符串池，减少相同字符串的内存占用，也用于hashmap的键
+/// 如果全局该字符串最后一个引用被释放， 则该字符串会释放。
+/// 为了减少不停的创建和放入池的次数，高频单次的Atom，可以在应用层增加一个cache来缓冲Atom，定期检查引用计数来判断是否缓冲。
 
 #[macro_use]
 extern crate lazy_static;
@@ -15,51 +8,212 @@ extern crate lazy_static;
 #[macro_use]
 extern crate serde;
 
-extern crate fnv;
-extern crate pi_bon;
-extern crate pi_share;
-extern crate pi_hash;
-
-
-use std::mem::replace;
+use core::fmt;
+use std::borrow::{Borrow, Cow};
+use std::convert::{From, Infallible};
+use std::hash::Hash;
+use std::iter::*;
 use std::ops::Deref;
-use std::convert::From;
-use std::hash::{Hash, Hasher};
-use std::collections::hash_map::{Entry};
-use std::str::pattern::Pattern;
-use std::str::Split;
-use std::iter::Map;
+use std::str::FromStr;
+use std::sync::atomic::Ordering;
 
+use dashmap::DashMap;
+use pi_key_alloter::new_key_type;
+use pi_share::ShareUsize;
+use pi_slot::SlotMap;
 #[cfg(feature = "serde")]
-use serde::{Serialize, Deserialize, Serializer, Deserializer};
-
-use pi_hash::XHashMap;
-use pi_bon::{WriteBuffer, ReadBuffer, Encode, Decode, ReadBonErr};
-use pi_share::{Share, ShareWeak, ShareRwLock};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use smol_str::SmolStr;
 
 // 同步原语，可用于运行一次性初始化。用于全局，FFI或相关功能的一次初始化。
 lazy_static! {
-	static ref ATOM_MAP: Table = Table(ShareRwLock::new(XHashMap::default()));
-	pub static ref EMPTY: Atom = Atom::from(Vec::new());
+    static ref SLOT_MAP: SlotMap<Key, (SmolStr, ShareUsize)> = SlotMap::default();
+    static ref ATOM_MAP: DashMap<SmolStr, Key> = DashMap::default();
 }
 
-#[cfg(all(not(feature = "pi_hash/xxhash"), not(feature="pointer_width_32")))]
-pub type CurHasher = fxhash::FxHasher64;
-
-#[cfg(all(not(feature = "pi_hash/xxhash"), feature="pointer_width_32"))]
-pub type CurHasher = fxhash::FxHasher32;
-
-#[cfg(all(feature = "pi_hash/xxhash", not(feature="pointer_width_32")))]
-pub type CurHasher = twox_hash::XxHash64;
-
-#[cfg(all(feature = "pi_hash/xxhash", feature="pointer_width_32"))]
-pub type CurHasher = twox_hash::XxHash32;
-
 // 原子字符串
-#[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub struct Atom(Share<(String, usize)>);
-unsafe impl Sync for Atom {}
-unsafe impl Send for Atom {}
+new_key_type! {
+    struct Key;
+}
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct Atom(Key);
+
+impl Atom {
+    pub fn new<T>(text: T) -> Atom
+    where
+        T: AsRef<str>,
+    {
+        Self::create(SmolStr::new(text))
+    }
+    pub fn create(s: SmolStr) -> Atom {
+        match ATOM_MAP.entry(s) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => {
+                let key = *entry.get();
+                let (_, n) = SLOT_MAP.get(key).unwrap();
+                n.fetch_add(1, Ordering::Release);
+                Atom(key)
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let key = SLOT_MAP.insert((entry.key().clone(), ShareUsize::new(1)));
+                entry.insert(key);
+                Atom(key)
+            }
+        }
+    }
+    #[inline(always)]
+    pub fn as_str(&self) -> &str {
+        SLOT_MAP.get(self.0).unwrap().0.as_str()
+    }
+    // #[inline(always)]
+    // fn from_char_iter<I: Iterator<Item = char>>(iter: I) -> Atom {
+    //     Self::create(SmolStr::from_iter(iter))
+    // }
+}
+impl Clone for Atom {
+    fn clone(&self) -> Self {
+        if let Some((_, n)) = SLOT_MAP.get(self.0) {
+            n.fetch_add(1, Ordering::Release);
+        }
+        Atom(self.0)
+    }
+}
+
+impl Drop for Atom {
+    fn drop(&mut self) {
+        if let Some((s, n)) = SLOT_MAP.get(self.0) {
+            if n.fetch_sub(1, Ordering::Release) > 1 {
+                return;
+            }
+            ATOM_MAP.remove_if(s, |_, _| {
+                // 进入锁后，再次判断是否需要释放
+                if n.load(Ordering::Acquire) > 1 {
+                    return false;
+                }
+                SLOT_MAP.remove(self.0);
+                true
+            });
+        }
+    }
+}
+
+impl Deref for Atom {
+    type Target = SmolStr;
+
+    fn deref(&self) -> &SmolStr {
+        &SLOT_MAP.get(self.0).unwrap().0
+    }
+}
+
+impl AsRef<str> for Atom {
+    #[inline(always)]
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for Atom {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(self.as_str(), f)
+    }
+}
+
+impl FromIterator<char> for Atom {
+    fn from_iter<I: IntoIterator<Item = char>>(iter: I) -> Atom {
+        // let iter = iter.into_iter();
+        // Self::from_char_iter(iter)
+        Self::create(SmolStr::from_iter(iter))
+    }
+}
+
+impl FromIterator<String> for Atom {
+    fn from_iter<I: IntoIterator<Item = String>>(iter: I) -> Atom {
+        Self::create(SmolStr::from_iter(iter))
+    }
+}
+
+impl<'a> FromIterator<&'a String> for Atom {
+    fn from_iter<I: IntoIterator<Item = &'a String>>(iter: I) -> Atom {
+        Self::create(SmolStr::from_iter(iter))
+//        Atom::from_iter(iter.into_iter().map(|x| x.as_str()))
+    }
+}
+
+impl<'a> FromIterator<&'a str> for Atom {
+    fn from_iter<I: IntoIterator<Item = &'a str>>(iter: I) -> Atom {
+        Self::create(SmolStr::from_iter(iter))
+    }
+}
+
+impl From<&str> for Atom {
+    #[inline]
+    fn from(s: &str) -> Atom {
+        Atom::new(s)
+    }
+}
+
+impl From<&mut str> for Atom {
+    #[inline]
+    fn from(s: &mut str) -> Atom {
+        Atom::new(s)
+    }
+}
+
+impl From<&String> for Atom {
+    #[inline]
+    fn from(s: &String) -> Atom {
+        Atom::new(s)
+    }
+}
+
+impl From<String> for Atom {
+    #[inline(always)]
+    fn from(text: String) -> Self {
+        Self::new(text)
+    }
+}
+
+impl From<Box<str>> for Atom {
+    #[inline]
+    fn from(s: Box<str>) -> Atom {
+        Atom::new(s)
+    }
+}
+
+impl<'a> From<Cow<'a, str>> for Atom {
+    #[inline]
+    fn from(s: Cow<'a, str>) -> Atom {
+        Atom::new(s)
+    }
+}
+impl<'a> From<&'a [u8]> for Atom {
+	#[inline(always)]
+	fn from(s: &[u8]) -> Atom {
+		Atom::new(core::str::from_utf8(s).unwrap())
+	}
+}
+
+impl From<Atom> for String {
+    #[inline(always)]
+    fn from(text: Atom) -> Self {
+        text.as_str().into()
+    }
+}
+
+impl Borrow<str> for Atom {
+    #[inline(always)]
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl FromStr for Atom {
+    type Err = Infallible;
+
+    #[inline]
+    fn from_str(s: &str) -> Result<Atom, Self::Err> {
+        Ok(Atom::from(s))
+    }
+}
 
 #[cfg(feature = "serde")]
 impl Serialize for Atom {
@@ -67,376 +221,130 @@ impl Serialize for Atom {
     where
         S: Serializer,
     {
-        (self.0).0.serialize(serializer)
+        self.as_str().serialize(serializer)
     }
 }
 #[cfg(feature = "serde")]
 impl<'de> Deserialize<'de> for Atom {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: Deserializer<'de>
+        D: Deserializer<'de>,
     {
-        Ok(Self::from(String::deserialize(deserializer)?))
+        Ok(Self::create(SmolStr::deserialize(deserializer)?))
     }
 }
+#[cfg(test)]
+mod tests {
+    //use std::{time::Duration, thread};
 
-impl Hash for Atom {
-    fn hash<H: Hasher>(&self, h: &mut H) {
-        h.write_usize(((self.0).1).clone())
-    }
-}
+    use crate::*;
+    use pi_hash::XHashMap;
+    use pi_share::Share;
 
-impl AsRef<str> for Atom {
-    #[inline(always)]
-    fn as_ref(&self) -> &str{
-        (*self.0).0.as_ref()
-    }
-}
+    #[test]
+    fn test_atom() {
+        let at3 = Atom::from("afg");
+        assert_eq!(at3.as_str(), "afg");
 
-impl Deref for Atom {
-	type Target = String;
-    #[inline(always)]
-	fn deref(&self) -> &String {
-		&(*self.0).0
-	}
-}
+        let mut map = XHashMap::default();
+        let time = std::time::Instant::now();
+        for i in 0..1000000 {
+            map.insert(i.to_string(), i);
+        }
+        println!("insert map time:{:?}", std::time::Instant::now() - time);
 
-impl Encode for Atom{
-	fn encode(&self, bb: &mut WriteBuffer){
-		(*self.0).0.encode(bb);
-	}
-}
+        let time = std::time::Instant::now();
+        let mut vec1 = vec![];
+        for i in 0..1000000 {
+            vec1.push(Atom::from(i.to_string()));
+        }
+        println!("atom from time:{:?}", std::time::Instant::now() - time);
 
-impl Decode for Atom{
-	fn decode(bb: &mut ReadBuffer) -> Result<Atom, ReadBonErr>{
-		Ok(Atom::from(String::decode(bb)?))
-	}
-}
+        let time = std::time::Instant::now();
+        let mut vec2 = vec![];
+        for i in 0..1000000 {
+            vec2.push(Atom::from(i.to_string()));
+        }
+        println!("atom look time:{:?}", std::time::Instant::now() - time);
 
-impl Atom {
-	// 返回的正整数为0表示静态原子，1表示为动态原子
-	// fn contain(s: Option<&String>, h: usize) -> Option<usize> {
-	// 	return None
-	// }
-	/// 获取该Atom的hash值
-    #[inline(always)]
-	pub fn get_hash(&self) -> usize {
-		(*self.0).1
-	}
-	/// 根据hash获取Atom，由应用来保证hash和字符串的一一对应
-	pub fn get(hash: usize) -> Option<Atom> {
-		ATOM_MAP.get(hash)
-	}
-
-}
-
-impl From<String> for Atom {
-    #[inline(always)]
-	fn from(s: String) -> Atom {
-		ATOM_MAP.or_insert(s)
-	}
-}
-
-impl<'a> From<&'a str> for Atom {
-    #[inline(always)]
-	fn from(s: &str) -> Atom {
-		ATOM_MAP.or_insert(String::from(s))
-	}
-}
-
-impl From<Vec<u8>> for Atom {
-    #[inline(always)]
-	fn from(s: Vec<u8>) -> Atom {
-		ATOM_MAP.or_insert(unsafe { String::from_utf8_unchecked(s) })
-	}
-}
-
-impl<'a> From<&'a [u8]> for Atom {
-	#[inline(always)]
-	fn from(s: &[u8]) -> Atom {
-		ATOM_MAP.or_insert(unsafe { String::from_utf8_unchecked(Vec::from(s)) })
-	}
-}
-/// 劈分字符串, 返回trim后的Atom的迭代器
-pub fn split<'a, P: Pattern<'a>>(s: &'a String, pat: P) -> Map<Split<'a, P>, fn(&str) -> Atom> {
-    s.split(pat).map(|r|{
-        Atom::from(r.trim_start().trim_end())
-    })
-}
-
-//todo
-// 为完美hash准备的方法
-// impl From<usize> for Atom {
-// 	#[inline]
-// 	fn from(s: String) -> Atom {
-// 		(Share::new((s, 0)))
-// 	}
-// }
-// fn from(s: String) -> Atom {
-// 	//loop {
-// 		// 先读锁，然后升级成写锁，如果升级失败则放弃读锁重新循环
-// 		Atom(Share::new((s, 0)))
-// 	//}
-// }
-
-// impl Hash for Atom {
-// 	#[inline]
-// 	fn hash<H: Hasher>(&self, state: &mut H) {
-// 		(*self.0).1.hash(state)
-// 	}
-// }
-
-// 为静态编译的完美hash的字符串准备的常量数组
-// const NB_BUCKETS: usize = 1 << 12;  // 4096
-// const BUCKET_MASK: usize = (1 << 12) - 1;
-
-// struct StringCache {
-//     buckets: [Option<Box<(String, usize)>>; NB_BUCKETS],
-// }
-
-// impl StringCache{
-// 	pub fn new() -> StringCache{
-
-// 	}
-// }
-// lazy_static! {
-//     static ref STRING_CACHE: Mutex<StringCache> = Mutex::new(StringCache::new());
-// }
-
-struct Table(ShareRwLock<XHashMap<usize, VerCowList>>);
-unsafe impl Send for Table {}
-
-impl Table{
-	pub fn get(&self, h: usize) -> Option<Atom>{
-		let map = self.0.read();
-		match map.get(&h) {
-			Some(v) => match v.list.value.upgrade() {
-				Some(r) => Some(Atom(r)),
-				_ => None,
-			},
-			_ => None,
-		}
-	}
-	pub fn or_insert(&self, s: String) -> Atom {
-		let h = str_hash(&s, &mut CurHasher::default());
-		let optlist = {
-			let map = self.0.read();
-			match map.get(&h) {
-				Some(v) => Some(v.clone()),
-				_ => None
-			}
-		};
-		let (version, list, strong) = match optlist {
-			Some(ver_list) => {
-				let mut nil_count = 0;
-				 match read_nil(&ver_list.list, &s, &mut nil_count) {
-					Some(r) => return r,
-					_ => {
-						let strong = Share::new((s, h));
-						// 如果存在无效弱引用，应该删除
-						let next = if nil_count > 1 {
-							free(ver_list.list, nil_count)
-						}else{
-							Some(Share::new(ver_list.list))
-						};
-						let node = CowList::with_next(Share::downgrade(&strong), next);
-						(ver_list.version, node, strong)
-					}
-				 }
-			},
-			_ => {
-                let strong = Share::new((s, h));
-                (0, CowList::new(Share::downgrade(&strong)), strong)
+        let mut arr3 = Vec::new();
+        for i in 0..1000 {
+            arr3.push(Atom::from(i.to_string()));
+        }
+        let mut arr4 = Vec::new();
+        let time = std::time::Instant::now();
+        for i in 0..1000 {
+            for _ in 0..1000 {
+                arr4.push(Atom::from(arr3[i].as_str()));
             }
-		};
+        }
+        println!("atom1 from time:{:?}", std::time::Instant::now() - time);
 
-		let mut map = self.0.write();
-		match map.entry(h) {
-			Entry::Occupied(mut e) => {
-				let old = e.get_mut();
-				if old.version == version { // 版本未更新，插入当前值
-					old.version += 1;
-					old.list = list;
-				}else{ // 版本被更新，需要重新检查
-					match read(&old.list, strong.as_ref().0.as_str()) {
-						Some(r) => return r,
-						_ => {
-							// 将自己的节点放到头部
-							let list = replace(&mut old.list, list);
-							old.list.next = Some(Share::new(list));
-						}
-					}
-				}
-			},
-			Entry::Vacant(e) => {
-				e.insert(VerCowList{list, version: 1});
-			}
-		}
-		Atom(strong)
-	}
+        let time = std::time::Instant::now();
+        for i in 0..1000 {
+            for _ in 0..1000 {
+                Share::new((arr3[i].as_str().to_string(), 5));
+            }
+        }
+        println!("Share::new time:{:?}", std::time::Instant::now() - time);
 
-}
-#[inline(always)]
-fn str_hash<T: Hasher>(s: &str, hasher: &mut T) -> usize{
-	s.hash(hasher);
-	hasher.finish() as usize
-}
+        let time = std::time::Instant::now();
+        for i in 0..1000 {
+            for _ in 0..1000 {
+                let _ = arr3[i].as_str();
+            }
+        }
+        println!("to_str time:{:?}", std::time::Instant::now() - time);
 
-fn read_nil(mut list: &CowList, s: &str, nil_count: &mut usize) -> Option<Atom> {
-	loop {
-		match list.value.upgrade() {
-			Some(r) => {
-				if r.0 == s {
-					return Some(Atom(r))
-				}
-			},
-			_ => *nil_count += 1,
-		}
-		match list.next {
-			Some(ref r) => list = r,
-			_ => return None
-		}
-	}
-}
-fn read(mut list: &CowList, s: &str) -> Option<Atom> {
-	loop {
-		match list.value.upgrade() {
-			Some(r) => {
-				if r.0 == s {
-					return Some(Atom(r))
-				}
-			},
-			_ => (),
-		}
-		match list.next {
-			Some(ref r) => list = r,
-			_ => return None
-		}
-	}
-}
-fn free(list: CowList, nil_count: usize) -> Option<Share<CowList>> {
-	if list.value.strong_count() > 0 {
-		let next = (*list.next.unwrap()).clone();
-		Some(Share::new(CowList::with_next(list.value.clone(), free(next, nil_count))))
-	}else{
-		if nil_count == 1 {
-			return list.next
-		}
-		free((*list.next.unwrap()).clone(), nil_count - 1)
-	}
-}
+        let time = std::time::Instant::now();
+        let xx = Share::new(1);
+        let w = Share::downgrade(&xx);
+        for _ in 0..1000000 {
+            let _ = w.upgrade();
+        }
+        println!("upgrade:{:?}", std::time::Instant::now() - time);
 
-#[derive(Clone)]
-struct VerCowList{
-	list:CowList,
-	version:usize,
-}
-unsafe impl Sync for VerCowList {}
-
-#[derive(Clone, Debug)]
-struct CowList{
-	value:ShareWeak<(String, usize)>,
-	next:Option<Share<CowList>>,
-}
-
-impl CowList{
-	pub fn new(value: ShareWeak<(String, usize)>) -> Self {
-		CowList{
-			value,
-			next: None,
-		}
-	}
-	pub fn with_next(value: ShareWeak<(String, usize)>, next:Option<Share<CowList>>) -> Self {
-		CowList{
-			value,
-			next,
-		}
-	}
-}
-
-#[test]
-fn test_atom() {
-
-    Atom::from("abc");
-	assert_eq!(ATOM_MAP.0.read().len(), 1);
-	Atom::from("afg");
-	assert_eq!(ATOM_MAP.0.read().len(), 2);
-	let at3 = Atom::from("afg");
-	assert_eq!(ATOM_MAP.0.read().len(), 2);
-	assert_eq!((at3.0).0, "afg");
-    let mut buf = WriteBuffer::new();
-    let a = Atom::from("vvvvvvv");
-    a.encode(&mut buf);
-	println!("EMPTY: {:?}", *EMPTY);
-
-    let mut map = XHashMap::default();
-    let time = std::time::Instant::now();
-    for _ in 0..1000000 {
-        map.insert("xx", "xx");
+        let time = std::time::Instant::now();
+        let xx = Share::new(1);
+        //let w = Share::downgrade(&xx);
+        for _ in 0..1000 {
+            for _ in 0..1000 {
+                let _a = xx.clone();
+            }
+        }
+        println!("clone: {:?}", std::time::Instant::now() - time);
     }
-    println!("insert map time:{:?}", std::time::Instant::now() - time);
+    #[test]
+    fn test_rng() {
 
-    let time = std::time::Instant::now();
-    for i in 0..1000000 {
-        Atom::from(i.to_string());
+        let _thread = std::thread::spawn(||{
+            rng();
+            return;
+        });
+
+        // thread.join().unwrap();
+
+        rng();
+        return;
     }
-    println!("atom from time:{:?}", std::time::Instant::now() - time);
-
-    
-    let mut arr = Vec::new();
-    for i in 0..1000{
-        arr.push(Atom::from(i.to_string()));
-    }
-
-    let time = std::time::Instant::now();
-    for i in 0..1000{
-        for _ in 0..1000{
-            Atom::from(arr[i].as_str());
+    fn rng() {
+        let mut vec = vec![];
+        for _ in 0..1000000 {
+            //thread::sleep(Duration::from_millis(0));
+            let mut buf = [0u8; 4];
+            getrandom::getrandom(&mut buf).unwrap();
+            let r = unsafe { *(buf.as_ptr() as usize as *mut u32) };
+            if r % 4 == 0 {
+                vec.push( Atom::from(r.to_string()));
+            }else if r % 4 == 1 && vec.len() > 0 {
+                let c = vec[r as usize % vec.len()].clone();
+                vec.push(c);
+            }else {
+                if vec.len() > 0 {
+                    vec.swap_remove(r as usize % vec.len());
+                }
+            }
+           
         }
     }
-    println!("atom1 from time:{:?}", std::time::Instant::now() - time);
-
-
-    let time = std::time::Instant::now();
-    for i in 0..1000{
-        for _ in 0..1000{
-            Share::new((arr[i].as_str().to_string(), 5));
-        }
-    }
-    println!("Share::new time:{:?}", std::time::Instant::now() - time);
-
-    let time = std::time::Instant::now();
-    for i in 0..1000{
-        for _ in 0..1000{
-            arr[i].as_str().to_string();
-        }
-    }
-    println!("to_string time:{:?}", std::time::Instant::now() - time);
-
-    let time = std::time::Instant::now();
-    for i in 0..10{
-        for _ in 0..100000{
-            let _ = str_hash(arr[i].as_str(), &mut CurHasher::default());
-        }
-    }
-    println!("cul hash: {:?}", std::time::Instant::now() - time);
-
-    let time = std::time::Instant::now();
-    let xx = Share::new(1);
-    let w = Share::downgrade(&xx);
-    for _ in 0..1000000{
-            w.upgrade();
-    }
-    println!("upgrade:{:?}", std::time::Instant::now() - time);
-
-    let time = std::time::Instant::now();
-    let xx = Share::new(1);
-    //let w = Share::downgrade(&xx);
-    for _ in 0..1000{
-        for _ in 0..1000{
-            let _a = xx.clone();
-        }
-    }
-    println!("clone: {:?}", std::time::Instant::now() - time);
-
 }
