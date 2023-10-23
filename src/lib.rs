@@ -11,35 +11,44 @@ extern crate serde;
 use core::fmt;
 use std::borrow::{Borrow, Cow};
 use std::convert::{From, Infallible};
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::iter::*;
 use std::ops::Deref;
 use std::str::FromStr;
-use std::sync::atomic::Ordering;
 
 use dashmap::DashMap;
-use pi_key_alloter::new_key_type;
-use pi_share::ShareUsize;
-use pi_slot::SlotMap;
+use pi_share::{Share, ShareWeak};
+
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smol_str::SmolStr;
 
 // 同步原语，可用于运行一次性初始化。用于全局，FFI或相关功能的一次初始化。
 lazy_static! {
-    static ref SLOT_MAP: SlotMap<Key, (SmolStr, ShareUsize)> = SlotMap::default();
-    static ref ATOM_MAP: DashMap<SmolStr, Key> = DashMap::default();
+    static ref ATOM_MAP: DashMap<SmolStr, Share<(SmolStr, usize)>> = DashMap::default();
+    static ref HASH_MAP: DashMap<usize, ShareWeak<(SmolStr, usize)>> = DashMap::default();
+    pub static ref EMPTY: Atom = Atom::from("");
 }
 
-// 原子字符串
-new_key_type! {
-    struct Key;
-}
-#[derive(Debug, PartialEq, Eq, Hash)]
-pub struct Atom(Key);
+#[cfg(all(not(feature = "pi_hash/xxhash"), not(feature = "pointer_width_32")))]
+pub type CurHasher = fxhash::FxHasher64;
+
+#[cfg(all(not(feature = "pi_hash/xxhash"), feature = "pointer_width_32"))]
+pub type CurHasher = fxhash::FxHasher32;
+
+#[cfg(all(feature = "pi_hash/xxhash", not(feature = "pointer_width_32")))]
+pub type CurHasher = twox_hash::XxHash64;
+
+#[cfg(all(feature = "pi_hash/xxhash", feature = "pointer_width_32"))]
+pub type CurHasher = twox_hash::XxHash32;
+
+#[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct Atom(Share<(SmolStr, usize)>);
+unsafe impl Sync for Atom {}
+unsafe impl Send for Atom {}
 
 impl Atom {
-    pub fn new<T>(text: T) -> Atom
+    pub fn new<T>(text: T) -> Self
     where
         T: AsRef<str>,
     {
@@ -47,60 +56,56 @@ impl Atom {
     }
     pub fn create(s: SmolStr) -> Atom {
         match ATOM_MAP.entry(s) {
-            dashmap::mapref::entry::Entry::Occupied(entry) => {
-                let key = *entry.get();
-                let (_, n) = SLOT_MAP.get(key).unwrap();
-                n.fetch_add(1, Ordering::Release);
-                Atom(key)
-            }
+            dashmap::mapref::entry::Entry::Occupied(entry) => Atom(entry.get().clone()),
             dashmap::mapref::entry::Entry::Vacant(entry) => {
-                let key = SLOT_MAP.insert((entry.key().clone(), ShareUsize::new(1)));
-                entry.insert(key);
-                Atom(key)
+                let s = entry.key().clone();
+                let str_hash = str_hash(&s);
+                let r = Share::new((s, str_hash));
+                entry.insert(r.clone());
+                Atom(r)
             }
         }
     }
     #[inline(always)]
-    pub fn as_str(&self) -> &str {
-        SLOT_MAP.get(self.0).unwrap().0.as_str()
+    pub fn share(&self) -> &Share<(SmolStr, usize)> {
+        &self.0
     }
-    // #[inline(always)]
-    // fn from_char_iter<I: Iterator<Item = char>>(iter: I) -> Atom {
-    //     Self::create(SmolStr::from_iter(iter))
-    // }
-}
-impl Clone for Atom {
-    fn clone(&self) -> Self {
-        if let Some((_, n)) = SLOT_MAP.get(self.0) {
-            n.fetch_add(1, Ordering::Release);
-        }
-        Atom(self.0)
+    #[inline(always)]
+    pub fn as_str(&self) -> &str {
+        self.0 .0.as_str()
+    }
+    /// 获取该Atom的hash值
+    #[inline(always)]
+    pub fn str_hash(&self) -> usize {
+        self.0 .1
     }
 }
 
+impl Hash for Atom {
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        h.write_usize(self.0 .1)
+    }
+}
 impl Drop for Atom {
     fn drop(&mut self) {
-        if let Some((s, n)) = SLOT_MAP.get(self.0) {
-            if n.fetch_sub(1, Ordering::Release) > 1 {
-                return;
-            }
-            ATOM_MAP.remove_if(s, |_, _| {
-                // 进入锁后，再次判断是否需要释放
-                if n.load(Ordering::Acquire) > 1 {
-                    return false;
-                }
-                SLOT_MAP.remove(self.0);
-                true
-            });
+        if Share::<(SmolStr, usize)>::strong_count(&self.0) > 2 {
+            return;
         }
+        ATOM_MAP.remove_if(&(self.0).0, |_, _| {
+            // 进入锁后，再次判断是否需要释放
+            if Share::<(SmolStr, usize)>::strong_count(&self.0) > 2 {
+                return false;
+            }
+            true
+        });
     }
 }
 
 impl Deref for Atom {
-    type Target = SmolStr;
+    type Target = str;
 
-    fn deref(&self) -> &SmolStr {
-        &SLOT_MAP.get(self.0).unwrap().0
+    fn deref(&self) -> &str {
+        (self.0).0.as_str()
     }
 }
 
@@ -119,8 +124,6 @@ impl fmt::Display for Atom {
 
 impl FromIterator<char> for Atom {
     fn from_iter<I: IntoIterator<Item = char>>(iter: I) -> Atom {
-        // let iter = iter.into_iter();
-        // Self::from_char_iter(iter)
         Self::create(SmolStr::from_iter(iter))
     }
 }
@@ -134,7 +137,6 @@ impl FromIterator<String> for Atom {
 impl<'a> FromIterator<&'a String> for Atom {
     fn from_iter<I: IntoIterator<Item = &'a String>>(iter: I) -> Atom {
         Self::create(SmolStr::from_iter(iter))
-//        Atom::from_iter(iter.into_iter().map(|x| x.as_str()))
     }
 }
 
@@ -186,10 +188,10 @@ impl<'a> From<Cow<'a, str>> for Atom {
     }
 }
 impl<'a> From<&'a [u8]> for Atom {
-	#[inline(always)]
-	fn from(s: &[u8]) -> Atom {
-		Atom::new(core::str::from_utf8(s).unwrap())
-	}
+    #[inline(always)]
+    fn from(s: &[u8]) -> Atom {
+        Atom::new(core::str::from_utf8(s).unwrap())
+    }
 }
 
 impl From<Atom> for String {
@@ -233,9 +235,34 @@ impl<'de> Deserialize<'de> for Atom {
         Ok(Self::create(SmolStr::deserialize(deserializer)?))
     }
 }
+
+#[inline(always)]
+pub fn str_hash<R: AsRef<str>>(s: R) -> usize {
+    let hasher = &mut CurHasher::default();
+    s.as_ref().hash(hasher);
+    hasher.finish() as usize
+}
+
+#[inline(always)]
+pub fn get_by_hash(hash: usize) -> Option<Atom> {
+    HASH_MAP
+        .get(&hash)
+        .map_or(None, |r| r.value().upgrade().map(|r| Atom(r)))
+}
+#[inline(always)]
+pub fn store_weak_by_hash(atom: Atom) {
+    HASH_MAP.insert(atom.0 .1, Share::<(SmolStr, usize)>::downgrade(&atom.0));
+}
+#[inline(always)]
+pub fn collect() {
+    HASH_MAP.retain(|_, v| v.strong_count() > 0);
+}
+
 #[cfg(test)]
 mod tests {
     //use std::{time::Duration, thread};
+
+    use std::sync::{Arc, Weak};
 
     use crate::*;
     use pi_hash::XHashMap;
@@ -279,11 +306,11 @@ mod tests {
             }
         }
         println!("atom1 from time:{:?}", std::time::Instant::now() - time);
-
+        let mut arr5 = Vec::new();
         let time = std::time::Instant::now();
         for i in 0..1000 {
             for _ in 0..1000 {
-                Share::new((arr3[i].as_str().to_string(), 5));
+                arr5.push(Share::new((arr3[i].as_str().to_string(), 5)));
             }
         }
         println!("Share::new time:{:?}", std::time::Instant::now() - time);
@@ -315,9 +342,19 @@ mod tests {
         println!("clone: {:?}", std::time::Instant::now() - time);
     }
     #[test]
+    fn test_arc() {
+        let r = {
+            let a = Atom::from("1");
+            let _a1 = Atom::from("1");
+            println!("a ref count: {}", Arc::strong_count(a.share()));
+            Arc::downgrade(a.share())
+        };
+        println!("r ref count: {:?}", Weak::strong_count(&r));
+        println!("r ref count: {:?}", r.upgrade());
+    }
+    #[test]
     fn test_rng() {
-
-        let _thread = std::thread::spawn(||{
+        let _thread = std::thread::spawn(|| {
             rng();
             return;
         });
@@ -335,16 +372,15 @@ mod tests {
             getrandom::getrandom(&mut buf).unwrap();
             let r = unsafe { *(buf.as_ptr() as usize as *mut u32) };
             if r % 4 == 0 {
-                vec.push( Atom::from(r.to_string()));
-            }else if r % 4 == 1 && vec.len() > 0 {
+                vec.push(Atom::from(r.to_string()));
+            } else if r % 4 == 1 && vec.len() > 0 {
                 let c = vec[r as usize % vec.len()].clone();
                 vec.push(c);
-            }else {
+            } else {
                 if vec.len() > 0 {
                     vec.swap_remove(r as usize % vec.len());
                 }
             }
-           
         }
     }
 }
