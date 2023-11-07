@@ -16,6 +16,7 @@ use std::iter::*;
 use std::ops::Deref;
 use std::str::FromStr;
 
+use pi_bon::{WriteBuffer, ReadBuffer, Encode, Decode, ReadBonErr};
 use dashmap::DashMap;
 use pi_share::{Share, ShareWeak};
 
@@ -46,6 +47,18 @@ pub type CurHasher = twox_hash::XxHash32;
 pub struct Atom(Share<(SmolStr, usize)>);
 unsafe impl Sync for Atom {}
 unsafe impl Send for Atom {}
+
+impl Encode for Atom{
+    fn encode(&self, bb: &mut WriteBuffer){
+        (*self.0).0.as_str().to_string().encode(bb);
+    }
+}
+
+impl Decode for Atom{
+    fn decode(bb: &mut ReadBuffer) -> Result<Atom, ReadBonErr>{
+        Ok(Atom::from(String::decode(bb)?))
+    }
+}
 
 impl Atom {
     pub fn new<T>(text: T) -> Self

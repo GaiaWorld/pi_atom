@@ -1,6 +1,6 @@
 [package]
 name = "pi_atom"
-version = "0.3.1"
+version = "0.5.0"
 authors = ["zmythleo <zmythleo@gmail.com>"]
 edition = "2021"
 description = "The global thread safe atomic string pool reduces the memory occupation of the same string and is also used for HashMap keys"
@@ -15,6 +15,7 @@ dashmap = "5.5"
 smol_str = "0.2"
 lazy_static = "1.4"
 pi_share = "0.4"
+pi_bon = "0.2"
 fxhash = "0.2.1"
 twox-hash = "1.6"
 
