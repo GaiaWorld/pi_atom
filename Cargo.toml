@@ -1,6 +1,6 @@
 [package]
 name = "pi_atom"
-version = "0.5.0"
+version = "0.5.1"
 authors = ["zmythleo <zmythleo@gmail.com>"]
 edition = "2021"
 description = "The global thread safe atomic string pool reduces the memory occupation of the same string and is also used for HashMap keys"
@@ -25,8 +25,8 @@ getrandom = "0.2"
 [dependencies.serde]
 version = "1.0"
 features = ["serde_derive"]
-optional = true
 default_features = true
 
 [features]
 pointer_width_32 = []
+serde = ["smol_str/serde"]
