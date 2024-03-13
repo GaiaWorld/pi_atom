@@ -10,7 +10,7 @@ extern crate serde;
 
 use core::fmt;
 use std::borrow::{Borrow, Cow};
-use std::convert::{From, Infallible};
+use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
 use std::iter::*;
 use std::ops::Deref;
@@ -75,14 +75,15 @@ impl Atom {
                 let str_hash = str_hash(&s);
                 let r = Share::new((s, str_hash));
                 entry.insert(r.clone());
+                #[cfg(feature="lookup_by_hash")]
+                {
+                    HASH_MAP.insert(str_hash, Share::downgrade(&r));
+                }
                 Atom(r)
             }
         }
     }
-    #[inline(always)]
-    pub fn share(&self) -> &Share<(SmolStr, usize)> {
-        &self.0
-    }
+
     #[inline(always)]
     pub fn as_str(&self) -> &str {
         self.0 .0.as_str()
@@ -109,6 +110,10 @@ impl Drop for Atom {
             if Share::<(SmolStr, usize)>::strong_count(&self.0) > 2 {
                 return false;
             }
+            #[cfg(feature="lookup_by_hash")]
+            {
+                HASH_MAP.remove(&self.0.1);
+            }    
             true
         });
     }
@@ -275,11 +280,9 @@ pub fn collect() {
 mod tests {
     //use std::{time::Duration, thread};
 
-    use std::sync::{Arc, Weak};
 
     use crate::*;
     use pi_hash::XHashMap;
-    use pi_share::Share;
 
     #[test]
     fn test_atom() {
@@ -353,17 +356,6 @@ mod tests {
             }
         }
         println!("clone: {:?}", std::time::Instant::now() - time);
-    }
-    #[test]
-    fn test_arc() {
-        let r = {
-            let a = Atom::from("1");
-            let _a1 = Atom::from("1");
-            println!("a ref count: {}", Arc::strong_count(a.share()));
-            Arc::downgrade(a.share())
-        };
-        println!("r ref count: {:?}", Weak::strong_count(&r));
-        println!("r ref count: {:?}", r.upgrade());
     }
     #[test]
     fn test_rng() {
