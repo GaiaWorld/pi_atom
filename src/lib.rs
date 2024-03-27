@@ -208,7 +208,7 @@ unsafe impl Send for Table {}
 
 impl Table{
 	pub fn get(&self, h: usize) -> Option<Atom>{
-		let map = self.0.read();
+		let map = self.0.read().unwrap();
 		match map.get(&h) {
 			Some(v) => match v.list.value.upgrade() {
 				Some(r) => Some(Atom(r)),
@@ -220,7 +220,7 @@ impl Table{
 	pub fn or_insert(&self, s: String) -> Atom {
 		let h = str_hash(&s, &mut CurHasher::default());
 		let optlist = {
-			let map = self.0.read();
+			let map = self.0.read().unwrap();
 			match map.get(&h) {
 				Some(v) => Some(v.clone()),
 				_ => None
@@ -250,7 +250,7 @@ impl Table{
             }
 		};
 
-		let mut map = self.0.write();
+		let mut map = self.0.write().unwrap();
 		match map.entry(h) {
 			Entry::Occupied(mut e) => {
 				let old = e.get_mut();
@@ -358,11 +358,11 @@ impl CowList{
 fn test_atom() {
 
     Atom::from("abc");
-	assert_eq!(ATOM_MAP.0.read().len(), 1);
+	assert_eq!(ATOM_MAP.0.read().unwrap().len(), 1);
 	Atom::from("afg");
-	assert_eq!(ATOM_MAP.0.read().len(), 2);
+	assert_eq!(ATOM_MAP.0.read().unwrap().len(), 2);
 	let at3 = Atom::from("afg");
-	assert_eq!(ATOM_MAP.0.read().len(), 2);
+	assert_eq!(ATOM_MAP.0.read().unwrap().len(), 2);
 	assert_eq!((at3.0).0, "afg");
     let mut buf = WriteBuffer::new();
     let a = Atom::from("vvvvvvv");
