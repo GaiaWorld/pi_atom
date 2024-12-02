@@ -26,8 +26,8 @@ use smol_str::SmolStr;
 
 // 同步原语，可用于运行一次性初始化。用于全局，FFI或相关功能的一次初始化。
 lazy_static! {
-    static ref ATOM_MAP: DashMap<SmolStr, Share<(SmolStr, usize)>> = DashMap::default();
-    static ref HASH_MAP: DashMap<usize, ShareWeak<(SmolStr, usize)>> = DashMap::default();
+    static ref ATOM_MAP: DashMap<SmolStr, Share<(SmolStr, Usize)>> = DashMap::default();
+    static ref HASH_MAP: DashMap<Usize, ShareWeak<(SmolStr, Usize)>> = DashMap::default();
     pub static ref EMPTY: Atom = Atom::from("");
 }
 
@@ -43,8 +43,13 @@ pub type CurHasher = twox_hash::XxHash64;
 #[cfg(all(feature = "pi_hash/xxhash", feature = "pointer_width_32"))]
 pub type CurHasher = twox_hash::XxHash32;
 
+#[cfg(feature = "pointer_width_32")]
+pub type Usize = u32;
+#[cfg(not(feature = "pointer_width_32"))]
+pub type Usize = u64;
+
 #[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub struct Atom(Share<(SmolStr, usize)>);
+pub struct Atom(Share<(SmolStr, Usize)>);
 unsafe impl Sync for Atom {}
 unsafe impl Send for Atom {}
 
@@ -90,24 +95,27 @@ impl Atom {
     }
     /// 获取该Atom的hash值
     #[inline(always)]
-    pub fn str_hash(&self) -> usize {
+    pub fn str_hash(&self) -> Usize {
         self.0 .1
     }
 }
 
 impl Hash for Atom {
     fn hash<H: Hasher>(&self, h: &mut H) {
-        h.write_usize(self.0 .1)
+        #[cfg(feature = "pointer_width_32")]
+        h.write_u32(self.0 .1);
+        #[cfg(not(feature = "pointer_width_32"))]
+        h.write_u64(self.0 .1)
     }
 }
 impl Drop for Atom {
     fn drop(&mut self) {
-        if Share::<(SmolStr, usize)>::strong_count(&self.0) > 2 {
+        if Share::<(SmolStr, Usize)>::strong_count(&self.0) > 2 {
             return;
         }
         ATOM_MAP.remove_if(&(self.0).0, |_, _| {
             // 进入锁后，再次判断是否需要释放
-            if Share::<(SmolStr, usize)>::strong_count(&self.0) > 2 {
+            if Share::<(SmolStr, Usize)>::strong_count(&self.0) > 2 {
                 return false;
             }
             #[cfg(feature="lookup_by_hash")]
@@ -255,21 +263,21 @@ impl<'de> Deserialize<'de> for Atom {
 }
 
 #[inline(always)]
-pub fn str_hash<R: AsRef<str>>(s: R) -> usize {
+pub fn str_hash<R: AsRef<str>>(s: R) -> Usize {
     let hasher = &mut CurHasher::default();
     s.as_ref().hash(hasher);
-    hasher.finish() as usize
+    hasher.finish() as Usize
 }
 
 #[inline(always)]
-pub fn get_by_hash(hash: usize) -> Option<Atom> {
+pub fn get_by_hash(hash: Usize) -> Option<Atom> {
     HASH_MAP
         .get(&hash)
         .map_or(None, |r| r.value().upgrade().map(|r| Atom(r)))
 }
 #[inline(always)]
 pub fn store_weak_by_hash(atom: Atom) {
-    HASH_MAP.insert(atom.0 .1, Share::<(SmolStr, usize)>::downgrade(&atom.0));
+    HASH_MAP.insert(atom.0 .1, Share::<(SmolStr, Usize)>::downgrade(&atom.0));
 }
 #[inline(always)]
 pub fn collect() {
@@ -283,6 +291,13 @@ mod tests {
 
     use crate::*;
     use pi_hash::XHashMap;
+
+    #[test]
+    fn test_atom1() {
+        let at3 = Atom::from("RES_GLTF_ACCESSOR_BUFFER_VIEW:app/scene_res/res/u3d_anim/eff_sz_chouka_daiji/eff_sz_chouka_daiji.gltf#Indices#19");
+        let at4 = Atom::from("RES_GLTF_ACCESSOR_BUFFER_VIEW:app/scene_res/res/u3d_anim/eff_sz_chouka_daiji/eff_sz_chouka_daiji.gltf#Indices#34");
+        println!("at3:{:?}, at4:{:?}", at3.str_hash(), at4.str_hash())
+    }
 
     #[test]
     fn test_atom() {
