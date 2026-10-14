@@ -1,6 +1,6 @@
 [package]
 name = "pi_atom"
-version = "0.6.1"
+version = "0.7.0"
 authors = ["zmythleo <zmythleo@gmail.com>"]
 edition = "2021"
 description = "The global thread safe atomic string pool reduces the memory occupation of the same string and is also used for HashMap keys"
@@ -10,14 +10,11 @@ keywords = ["pi",  "atom"]
 
 
 [dependencies]
-pi_hash = "0.1"
-dashmap = "6.1"
-smol_str = "0.2"
-lazy_static = "1.4"
-pi_share = "0.5"
-pi_bon = "0.3"
-fxhash = "0.2.1"
-twox-hash = "1.6"
+papaya = { version = "0.2.5", optional = true }
+rapidhash = "4.5"
+fory = "1.7.7"
+smol_str = "0.3.6"
+pi_share = { version = "2.0", path = "../pi_share" }
 
 [dev-dependencies]
 getrandom = "0.2"
@@ -25,9 +22,12 @@ getrandom = "0.2"
 [dependencies.serde]
 version = "1.0"
 features = ["serde_derive"]
-default_features = true
+default-features = true
+optional = true
 
 [features]
+default = ["dep:papaya"]
+rc = ["pi_share/rc"]
 pointer_width_32 = []
 lookup_by_hash = []
-serde = ["smol_str/serde"]
+serde = ["dep:serde", "smol_str/serde"]
