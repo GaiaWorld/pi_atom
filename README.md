@@ -12,13 +12,13 @@
 
 ## 序列化与特性
 
-Atom 支持 Fory Serializer，按字符串内容编码，解码后重新驻留。使用前须注册自定义序列化器，例如：
+Fory 默认不启用；需要时开启 `fory` 特性（如 `--features fory`，rc 模式使用 `--no-default-features --features rc,fory`）。此时 Atom 实现 Fory Serializer，按字符串内容编码，解码后重新驻留。使用前须注册自定义序列化器，例如：
 
 ```rust
 let mut fory = fory::Fory::builder().xlang(false).build();
 fory.register_serializer::<pi_atom::Atom>(200)?;
 ```
 
-注册 ID 由调用方管理；已有 BON 格式不会自动转换为 Fory 格式。可选 serde 特性保留 serde 字符串编解码；pointer_width_32 将指纹截为 u32，增加碰撞可能性。当前 Fory 1.7.7 在本机 i686 Windows 目标编译失败，已在 x86_64 Windows MSVC 验证。
+注册 ID 由调用方管理；已有 BON 格式不会自动转换为 Fory 格式。可选 serde 特性保留 serde 字符串编解码；pointer_width_32 将指纹截为 u32，增加碰撞可能性。当前 Fory 1.7.7 在本机 i686 Windows 目标编译失败；不启用 fory 特性可避开该依赖，Fory 集成已在 x86_64 Windows MSVC 验证。
 
 为了减少不停的创建和放入池的次数，高频单次的Atom，可以在应用层增加一个cache来缓冲Atom，定期检查引用计数来判断是否缓冲。

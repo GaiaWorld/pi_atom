@@ -1,6 +1,6 @@
 [package]
 name = "pi_atom"
-version = "0.7.0"
+version = "0.7.1"
 authors = ["zmythleo <zmythleo@gmail.com>"]
 edition = "2021"
 description = "The global thread safe atomic string pool reduces the memory occupation of the same string and is also used for HashMap keys"
@@ -8,16 +8,15 @@ repository = "https://github.com/GaiaWorld/pi_atom"
 license = "MIT OR Apache-2.0"
 keywords = ["pi",  "atom"]
 
-
 [dependencies]
 papaya = { version = "0.2.5", optional = true }
 rapidhash = "4.5"
-fory = "1.7.7"
+fory = { version = "1.7.7", optional = true }
 smol_str = "0.3.6"
-pi_share = { version = "2.0", path = "../pi_share" }
+pi_share = "2.0"
 
 [dev-dependencies]
-getrandom = "0.2"
+getrandom = "0.4"
 
 [dependencies.serde]
 version = "1.0"
@@ -28,6 +27,7 @@ optional = true
 [features]
 default = ["dep:papaya"]
 rc = ["pi_share/rc"]
+fory = ["dep:fory"]
 pointer_width_32 = []
 lookup_by_hash = []
 serde = ["dep:serde", "smol_str/serde"]

@@ -16,6 +16,7 @@ use std::str::FromStr;
 #[cfg(not(feature = "rc"))]
 use std::sync::LazyLock;
 
+#[cfg(feature = "fory")]
 use fory::{Error as ForyError, ReadContext, Serializer as ForySerializer, WriteContext};
 #[cfg(not(feature = "rc"))]
 use papaya::{Compute, HashMap as PapayaMap, Operation};
@@ -67,6 +68,7 @@ pub struct Atom {
     inner: Share<(SmolStr, Usize)>,
 }
 
+#[cfg(feature = "fory")]
 impl ForySerializer for Atom {
     type Target = Self;
 
@@ -454,6 +456,7 @@ mod tests {
     use crate::*;
     use std::collections::HashMap;
 
+    #[cfg(feature = "fory")]
     #[test]
     fn fory_roundtrip_reinterns_string() {
         let mut fory = fory::Fory::builder().xlang(false).build();
@@ -716,7 +719,7 @@ mod tests {
         for _ in 0..1000000 {
             //thread::sleep(Duration::from_millis(0));
             let mut buf = [0u8; 4];
-            getrandom::getrandom(&mut buf).unwrap();
+            getrandom::fill(&mut buf).unwrap();
             let r = u32::from_ne_bytes(buf);
             if r % 4 == 0 {
                 vec.push(Atom::from(r.to_string()));
